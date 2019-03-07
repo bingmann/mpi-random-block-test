@@ -38,6 +38,9 @@ unsigned hosts, my_rank;
 //! option to verify the transmitted data
 static const bool g_check_data = false;
 
+//! option to use MPI_Testany instead of MPI_Waitany (Testany is often slower?)
+static const bool g_use_testany = false;
+
 std::vector<Block> blocks;
 // MPI_Request array for Testany
 std::vector<MPI_Request> requests;
@@ -148,15 +151,25 @@ int main(int argc, char* argv[]) {
     }
 
     while (active != 0) {
-        int out_index, out_flag;
-        int r = MPI_Testany(num_requests, requests.data(), &out_index,
-            &out_flag, MPI_STATUS_IGNORE);
+        int out_index;
+        if (g_use_testany) {
+            int out_flag;
+            int r = MPI_Testany(num_requests, requests.data(), &out_index,
+                                &out_flag, MPI_STATUS_IGNORE);
 
-        if (r != MPI_SUCCESS)
-            abort();
+            if (r != MPI_SUCCESS)
+                abort();
 
-        if (out_flag == 0)
-            continue;
+            if (out_flag == 0)
+                continue;
+        }
+        else {
+            int r = MPI_Waitany(num_requests, requests.data(), &out_index,
+                                MPI_STATUS_IGNORE);
+
+            if (r != MPI_SUCCESS)
+                abort();
+        }
 
         assert(active > 0);
         --active;
