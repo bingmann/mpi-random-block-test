@@ -27,7 +27,7 @@ struct Block {
 
 size_t block_size = 2 * 1024 * 1024;
 
-const size_t num_requests = 4;
+size_t num_requests = 4;
 
 size_t total_requests = 1000;
 size_t remaining_requests = total_requests;
@@ -78,8 +78,8 @@ bool MaybeStartRequest(size_t r) {
         for (size_t i = 0; i < block_size / sizeof(size_t); ++i)
             sbuffer[i] = i + seq;
 
-        int r = MPI_Isend(buf.buffer, block_size, MPI_BYTE, (int)r_rank,
-            /* tag */ 0, MPI_COMM_WORLD, &req);
+        int r = MPI_Isend(buf.buffer, block_size, MPI_BYTE,
+                          (int)r_rank, /* tag */ 0, MPI_COMM_WORLD, &req);
         if (r != 0)
             abort();
 
@@ -100,8 +100,8 @@ bool MaybeStartRequest(size_t r) {
         }
         buf.seq = seq;
 
-        int r = MPI_Irecv(buf.buffer, block_size, MPI_BYTE, (int)s_rank,
-            /* tag */ 0, MPI_COMM_WORLD, &req);
+        int r = MPI_Irecv(buf.buffer, block_size, MPI_BYTE,
+                          (int)s_rank, /* tag */ 0, MPI_COMM_WORLD, &req);
         if (r != 0)
             abort();
 
@@ -111,23 +111,10 @@ bool MaybeStartRequest(size_t r) {
     return false;
 }
 
-int main(int argc, char* argv[]) {
-    if (argc <= 1) {
-        std::cout << argv[0] << " <block_size [KB]> <num_requests>"
-                  << std::endl;
-        return 1;
-    }
-
-    MPI_Init(&argc, &argv);
-
-    unsigned multiplier = atoi(argv[1]);
-    block_size = multiplier * 1024;
-
-    total_requests = atoi(argv[2]);
+void run_experiment()
+{
     remaining_requests = total_requests;
-
-    MPI_Comm_size(MPI_COMM_WORLD, (int*)&hosts);
-    MPI_Comm_rank(MPI_COMM_WORLD, (int*)&my_rank);
+    seq = 0;
 
     blocks.resize(num_requests);
     requests.resize(num_requests);
@@ -220,20 +207,70 @@ int main(int argc, char* argv[]) {
         // std::cout << "active " << active << std::endl;
     }
 
-    pool.loop_until_empty();
+    MPI_Barrier(MPI_COMM_WORLD);
 
     double ts_end = MPI_Wtime();
     double ts_delta = ts_end - ts_start;
 
+    uint64_t total_bytes = total_requests * block_size;
+
     std::cout << "RESULT"
               << " hosts=" << hosts
-              << " my_rank=" << my_rank
-              << " block_size=" << block_size << " requests=" << total_requests
-              << " multiplier=" << multiplier << " ts=" << ts_delta
-              << " tsdiv=" << ts_delta / multiplier
-              << " bw="
-              << (total_requests * block_size) / ts_delta / 1024 / 1024
+              << " block_size=" << block_size
+              << " requests=" << num_requests
+              << " total_requests=" << total_requests
+              << " total_bytes=" << total_bytes
+              << " ts=" << ts_delta
+              << " bw=" << total_bytes / ts_delta / 1024 / 1024
               << std::endl;
+
+    pool.loop_until_empty();
+}
+
+int main(int argc, char *argv[])
+{
+    MPI_Init(&argc, &argv);
+
+    if (argc <= 1) {
+        std::cout << argv[0]
+                  << " <min-block_size [KB]> <min-block_size [KB]>"
+                  << " <min-concurrent request>"
+                  << " <max-concurrent request>"
+                  << " <total bytes per PE [MB]>"
+                  << std::endl;
+
+        std::cout << "  Example: 8 8192 1 128 128"  << std::endl;
+
+        MPI_Finalize();
+
+        return 0;
+    }
+
+    MPI_Comm_size(MPI_COMM_WORLD, (int*)&hosts);
+    MPI_Comm_rank(MPI_COMM_WORLD, (int*)&my_rank);
+
+    unsigned min_block_size = atoi(argv[1]) * 1024;
+    unsigned max_block_size = atoi(argv[2]) * 1024;
+
+    unsigned min_requests = atoi(argv[3]);
+    unsigned max_requests = atoi(argv[4]);
+
+    unsigned request_factor = atoi(argv[5]) * 1024 * 1024;
+
+    for (block_size = min_block_size; block_size <= max_block_size;
+         block_size *= 2) {
+
+        for (num_requests = min_requests; num_requests <= max_requests;
+             num_requests *= 2) {
+
+            // calculate total number of requests in experiment
+            total_requests = request_factor * hosts / block_size;
+            if (total_requests == 0)
+                total_requests = 1;
+
+            run_experiment();
+        }
+    }
 
     MPI_Finalize();
 
