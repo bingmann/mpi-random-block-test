@@ -3,7 +3,7 @@
  *
  * MPI Random Block Transmission Speed Test
  *
- * Copyright (C) 2018 Timo Bingmann <tb@panthema.net>
+ * Copyright (C) 2018-2019 Timo Bingmann <tb@panthema.net>
  *
  * All rights reserved. Published under the Boost Software License, Version 1.0
  ******************************************************************************/
@@ -17,22 +17,22 @@
 
 #include <thread_pool.hpp>
 
-enum SendRecv { EMPTY, SEND, RECV };
-
-struct Block {
-    SendRecv op;
-    char* buffer;
-    size_t seq;
-};
-
+//! size of messages
 size_t block_size = 2 * 1024 * 1024;
 
-size_t num_requests = 4;
+//! number of simultaneous requests issued to MPI
+size_t num_requests = 16;
 
+//! total requests issued per host in one experiment run
 size_t total_requests = 1000;
+
+//! remaining requests in this experiment run
 size_t remaining_requests = total_requests;
+
+//! sequence number for checking messages
 size_t seq = 0;
 
+//! number of MPI hosts and my_rank among them
 unsigned hosts, my_rank;
 
 //! option to verify the transmitted data
@@ -41,11 +41,21 @@ static const bool g_check_data = false;
 //! option to use MPI_Testany instead of MPI_Waitany (Testany is often slower?)
 static const bool g_use_testany = false;
 
+enum SendRecv { EMPTY, SEND, RECV };
+
+struct Block {
+    SendRecv op;
+    char* buffer;
+    size_t seq;
+};
+
+//! array of blocks to issue MPI requests
 std::vector<Block> blocks;
-// MPI_Request array for Testany
+//! MPI_Request array for Testany
 std::vector<MPI_Request> requests;
 
-std::default_random_engine rnd(123456);
+//! random generator to determine pairs which communicate
+std::mt19937 rnd(123456);
 
 bool MaybeStartRequest(size_t r) {
     // pick next random send/recv pairs
@@ -111,7 +121,7 @@ bool MaybeStartRequest(size_t r) {
     return false;
 }
 
-void run_experiment()
+double run_experiment()
 {
     remaining_requests = total_requests;
     seq = 0;
@@ -129,14 +139,13 @@ void run_experiment()
     tlx::ThreadPool pool(16);
 
     // perform first num_requests
-    {
-        while (active != num_requests && remaining_requests > 0) {
-            if (MaybeStartRequest(active)) {
-                ++active;
-            }
+    while (active != num_requests && remaining_requests > 0) {
+        if (MaybeStartRequest(active)) {
+            ++active;
         }
     }
 
+    // replace finished requests with new ones
     while (active != 0) {
         int out_index;
         if (g_use_testany) {
@@ -212,10 +221,12 @@ void run_experiment()
     double ts_end = MPI_Wtime();
     double ts_delta = ts_end - ts_start;
 
-    uint64_t total_bytes = total_requests * block_size;
+    uint64_t total_bytes =
+        static_cast<uint64_t>(total_requests) * block_size;
 
     std::cout << "RESULT"
               << " hosts=" << hosts
+              << " my_rank=" << my_rank
               << " block_size=" << block_size
               << " requests=" << num_requests
               << " total_requests=" << total_requests
@@ -225,6 +236,11 @@ void run_experiment()
               << std::endl;
 
     pool.loop_until_empty();
+
+    MPI_Allreduce(MPI_IN_PLACE, &ts_delta,
+                  1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
+
+    return ts_delta;
 }
 
 int main(int argc, char *argv[])
@@ -233,10 +249,11 @@ int main(int argc, char *argv[])
 
     if (argc <= 1) {
         std::cout << argv[0]
-                  << " <min-block_size [KB]> <min-block_size [KB]>"
+                  << " <min-block_size [KiB]>"
+                  << " <max-block_size [KiB]>"
                   << " <min-concurrent request>"
                   << " <max-concurrent request>"
-                  << " <total bytes per PE [MB]>"
+                  << " <total bytes per PE [MiB]>"
                   << std::endl;
 
         std::cout << "  Example: 8 8192 1 128 128"  << std::endl;
@@ -255,7 +272,8 @@ int main(int argc, char *argv[])
     unsigned min_requests = atoi(argv[3]);
     unsigned max_requests = atoi(argv[4]);
 
-    unsigned request_factor = atoi(argv[5]) * 1024 * 1024;
+    uint64_t request_factor =
+        static_cast<uint64_t>(atoi(argv[5])) * 1024 * 1024;
 
     for (block_size = min_block_size; block_size <= max_block_size;
          block_size *= 2) {
@@ -268,7 +286,9 @@ int main(int argc, char *argv[])
             if (total_requests == 0)
                 total_requests = 1;
 
-            run_experiment();
+            double ts_delta = run_experiment();
+            if (ts_delta > 40)
+                break;
         }
     }
 
